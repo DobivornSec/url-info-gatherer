@@ -162,4 +162,3 @@ Beğendiysen GitHub'da ⭐ bırakmayı unutma!
 | v3.0 | Screenshot, subdomain, email, sosyal medya, güvenlik başlıkları, 25+ teknoloji |
 | v2.0 | DNS, WHOIS, SSL, teknoloji tespiti |
 | v1.0 | Temel HTTP bilgileri |
-```
