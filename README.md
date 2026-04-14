@@ -163,4 +163,3 @@ Beğendiysen GitHub'da ⭐ bırakmayı unutma!
 | v2.0 | DNS, WHOIS, SSL, teknoloji tespiti |
 | v1.0 | Temel HTTP bilgileri |
 ```
-Sıradaki araç hangisi? Dobivorn ekibinin diğer üyelerini de güncellemeye devam edelim mi? 
