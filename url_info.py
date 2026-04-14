@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-URL Info Gatherer v2.0 🐉
+URL Info Gatherer v3.0 🐉
 3 Başlı Ejderha | Red Team | Purple Team | Blue Team
 
-Özellikler:
-- HTTP/HTTPS bilgileri (status, headers, title)
-- SSL sertifika detayları
-- DNS kayıtları (A, MX, TXT, NS, CNAME)
-- WHOIS sorgulama
-- Teknoloji tespiti
-- Screenshot alma
-- Çoklu URL desteği
-- JSON/CSV raporlama
+v3.0 Yenilikler:
+- Screenshot gerçek görüntü kaydetme (webdriver-manager ile)
+- Subdomain bulma (DNS brute force)
+- Email scraping
+- Sosyal medya bağlantıları tespiti
+- Gelişmiş teknoloji tespiti (25+)
+- Güvenlik başlıkları analizi
+- Daha hızlı thread yönetimi
 """
 
 import requests
@@ -23,11 +22,25 @@ import json
 import csv
 import sys
 import argparse
+import os
+import re
+import subprocess
 from datetime import datetime
 from urllib.parse import urlparse
 from colorama import init, Fore, Style
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import re
+
+# Screenshot için (opsiyonel - hata yönetimi eklendi)
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
+import time
 
 # Uyarıları kapat
 import urllib3
@@ -38,104 +51,217 @@ init(autoreset=True)
 
 # Banner
 BANNER = f"""
-{Fore.BLUE}╔══════════════════════════════════════════════════════════════╗
-║   🐉 URL Info Gatherer v2.0 - 3 Başlı Ejderha                ║
-║   🔴 Red Team | 🟣 Purple Team | 🔵 Blue Team                ║
-║   🌐 WHOIS | DNS | SSL | Screenshot | Tech Detect           ║
-╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+{Fore.BLUE}╔══════════════════════════════════════════════════════════════════════════╗
+║   🐉 URL Info Gatherer v3.0 - 3 Başlı Ejderha                          ║
+║   🔴 Red Team | 🟣 Purple Team | 🔵 Blue Team                          ║
+║   🌐 WHOIS | DNS | SSL | Screenshot | Tech Detect | Subdomain         ║
+╚══════════════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
 """
 
-# Teknoloji tespiti için imzalar
+# Gelişmiş teknoloji tespiti imzaları
 TECH_SIGNATURES = {
-    'WordPress': ['wp-content', 'wp-includes', 'wp-json'],
-    'Laravel': ['laravel_session', 'csrf-token'],
-    'Django': ['csrftoken', 'admin/login'],
-    'React': ['_next', 'react', 'manifest.json'],
-    'Angular': ['_ng', 'ng-app'],
-    'Bootstrap': ['bootstrap.min.css', 'bootstrap.js'],
-    'jQuery': ['jquery.min.js', 'jquery.js'],
+    'CMS': {
+        'WordPress': ['wp-content', 'wp-includes', 'wp-json', 'wordpress'],
+        'Joomla': ['joomla', 'com_content', 'com_users'],
+        'Drupal': ['drupal', 'sites/default', 'core/misc'],
+        'Magento': ['magento', 'skin/frontend'],
+        'Shopify': ['shopify', 'myshopify.com'],
+        'Wix': ['wix.com', 'wixstatic'],
+    },
+    'Framework': {
+        'Laravel': ['laravel_session', 'csrf-token', 'laravel'],
+        'Django': ['csrftoken', 'admin/login', 'django'],
+        'React': ['_next', 'react', 'manifest.json', 'react-dom'],
+        'Angular': ['_ng', 'ng-app', 'angular'],
+        'Vue.js': ['vue.js', 'vue.min', 'data-v-'],
+        'Flask': ['flask', '__debug__'],
+        'Express': ['express', 'x-powered-by: express'],
+        'Ruby on Rails': ['rails', 'csrf-param', 'authenticity_token'],
+    },
+    'Library': {
+        'jQuery': ['jquery.min.js', 'jquery.js', 'jquery-'],
+        'Bootstrap': ['bootstrap.min.css', 'bootstrap.css', 'bootstrap.js'],
+        'Tailwind': ['tailwind.css', 'tailwind.min'],
+        'FontAwesome': ['fontawesome', 'fa.min.css'],
+        'Google Fonts': ['fonts.googleapis.com'],
+    },
+    'Analytics': {
+        'Google Analytics': ['google-analytics.com', 'ga.js', 'gtag'],
+        'Facebook Pixel': ['facebook.com/tr', 'fbq'],
+    },
+    'CDN': {
+        'CloudFlare': ['cloudflare', 'cf-ray', '__cfduid'],
+        'Akamai': ['akamai', 'akamaiedge'],
+        'Fastly': ['fastly', 'x-fastly'],
+    }
 }
 
-class URLInfoGatherer:
-    def __init__(self, urls, output=None, format='json', screenshot=False, threads=5):
+# Sosyal medya pattern'leri
+SOCIAL_PATTERNS = {
+    'Twitter': r'(?:twitter\.com|x\.com)/([a-zA-Z0-9_]+)',
+    'Instagram': r'instagram\.com/([a-zA-Z0-9_.]+)',
+    'Facebook': r'facebook\.com/([a-zA-Z0-9.]+)',
+    'LinkedIn': r'linkedin\.com/(?:company|in)/([a-zA-Z0-9-]+)',
+    'GitHub': r'github\.com/([a-zA-Z0-9-]+)',
+    'YouTube': r'youtube\.com/(?:c|channel|user)/([a-zA-Z0-9_-]+)',
+    'Discord': r'discord\.(?:gg|com/invite)/([a-zA-Z0-9]+)',
+    'Telegram': r't\.me/([a-zA-Z0-9_]+)',
+}
+
+# Ortak subdomain listesi
+COMMON_SUBDOMAINS = [
+    'www', 'mail', 'ftp', 'localhost', 'webmail', 'smtp', 'pop', 'ns1', 'webdisk',
+    'ns2', 'cpanel', 'whm', 'autodiscover', 'autoconfig', 'blog', 'shop', 'store',
+    'support', 'dev', 'test', 'stage', 'api', 'app', 'admin', 'login', 'account',
+    'secure', 'vpn', 'remote', 'wiki', 'docs', 'static', 'media', 'cdn', 'img',
+    'video', 'download', 'backup', 'dns', 'mail2', 'forum', 'community',
+    'news', 'portal', 'partner', 'status', 'demo', 'beta', 'sandbox'
+]
+
+class URLInfoGathererV3:
+    def __init__(self, urls, output=None, format='json', screenshot=False, threads=5, subdomain=False):
         self.urls = urls if isinstance(urls, list) else [urls]
         self.output = output
         self.format = format
         self.screenshot = screenshot
         self.threads = threads
+        self.subdomain = subdomain
         self.results = []
+        self.screenshot_dir = "screenshots"
+        
+        if screenshot:
+            os.makedirs(self.screenshot_dir, exist_ok=True)
+            if not SELENIUM_AVAILABLE:
+                print(f"{Fore.YELLOW}[!] Uyarı: Selenium kurulu değil. Screenshot özelliği çalışmayacak.{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}    Kurulum için: pip install selenium webdriver-manager{Style.RESET_ALL}")
         
     def normalize_url(self, url):
-        """URL'yi düzelt"""
         url = url.strip()
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         return url
     
     def get_http_info(self, url):
-        """HTTP bilgilerini topla"""
-        info = {}
+        info = {
+            'status_code': 'Hata',
+            'final_url': url,
+            'content_length': 0,
+            'server': 'Bilinmiyor',
+            'title': 'Bulunamadı',
+            'technologies': [],
+            'links': [],
+            'emails': [],
+            'social_media': [],
+            'security_headers': {}
+        }
+        
         try:
-            response = requests.get(url, timeout=10, verify=False, allow_redirects=True)
+            response = requests.get(url, timeout=15, verify=False, allow_redirects=True)
             info['status_code'] = response.status_code
             info['final_url'] = response.url
             info['content_length'] = len(response.content)
             info['server'] = response.headers.get('Server', 'Bilinmiyor')
+            info['security_headers'] = self.check_security_headers(response.headers)
             
-            # Sayfa başlığı
-            title_start = response.text.find('<title>')
-            title_end = response.text.find('</title>')
-            if title_start != -1 and title_end != -1:
-                info['title'] = response.text[title_start+7:title_end][:100]
-            else:
-                info['title'] = 'Bulunamadı'
+            # Title
+            title_match = re.search(r'<title>(.*?)</title>', response.text, re.IGNORECASE)
+            if title_match:
+                info['title'] = title_match.group(1).strip()[:150]
             
             # Teknoloji tespiti
             info['technologies'] = self.detect_technologies(response.text, response.headers)
             
-            # Link bulma
+            # Linkler
             info['links'] = self.extract_links(response.text, url)
             
-        except requests.exceptions.RequestException as e:
+            # Email scraping
+            info['emails'] = self.extract_emails(response.text)
+            
+            # Sosyal medya
+            info['social_media'] = self.extract_social_media(response.text)
+            
+        except requests.exceptions.Timeout:
+            info['error'] = 'Timeout'
+        except requests.exceptions.ConnectionError:
+            info['error'] = 'Connection Error'
+        except Exception as e:
             info['error'] = str(e)
-            info['status_code'] = 'Hata'
         
         return info
     
+    def check_security_headers(self, headers):
+        security_headers = {
+            'Strict-Transport-Security': '❌',
+            'Content-Security-Policy': '❌',
+            'X-Frame-Options': '❌',
+            'X-Content-Type-Options': '❌',
+            'Referrer-Policy': '❌',
+            'Permissions-Policy': '❌'
+        }
+        
+        for header in security_headers.keys():
+            if header in headers:
+                security_headers[header] = '✅'
+        
+        return security_headers
+    
     def detect_technologies(self, html, headers):
-        """Teknoloji tespiti yap"""
-        detected = set()
-        combined = html.lower() + str(headers).lower()
+        detected = []
+        combined = html.lower()
         
-        for tech, indicators in TECH_SIGNATURES.items():
-            for indicator in indicators:
-                if indicator.lower() in combined:
-                    detected.add(tech)
-                    break
+        for category, techs in TECH_SIGNATURES.items():
+            for tech, indicators in techs.items():
+                for indicator in indicators:
+                    if indicator.lower() in combined:
+                        detected.append(tech)
+                        break
         
-        # Server header'dan tespit
+        # Server header kontrolü
         if 'Server' in headers:
             server = headers['Server'].lower()
             if 'nginx' in server:
-                detected.add('Nginx')
+                detected.append('Nginx')
             elif 'apache' in server:
-                detected.add('Apache')
+                detected.append('Apache')
             elif 'cloudflare' in server:
-                detected.add('CloudFlare')
+                detected.append('CloudFlare')
+            elif 'iis' in server:
+                detected.append('IIS')
         
-        return list(detected)
+        return list(dict.fromkeys(detected))
     
     def extract_links(self, html, base_url):
-        """Sayfadaki linkleri bul"""
         links = set()
-        pattern = r'href=["\'](https?://[^"\']+)["\']'
-        matches = re.findall(pattern, html)
-        for match in matches[:20]:
-            links.add(match)
+        patterns = [
+            r'href=["\'](https?://[^"\']+)["\']',
+            r'src=["\'](https?://[^"\']+)["\']'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html)
+            for match in matches[:30]:
+                links.add(match)
+        
         return list(links)
     
+    def extract_emails(self, html):
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        emails = re.findall(email_pattern, html)
+        return list(dict.fromkeys(emails[:20]))
+    
+    def extract_social_media(self, html):
+        found = []
+        for platform, pattern in SOCIAL_PATTERNS.items():
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                found.append({
+                    'platform': platform,
+                    'handle': match,
+                    'url': f"https://{platform.lower()}.com/{match}" if platform != 'Twitter' else f"https://twitter.com/{match}"
+                })
+        return found[:15]
+    
     def get_ssl_info(self, domain):
-        """SSL sertifika bilgileri"""
         info = {}
         try:
             context = ssl.create_default_context()
@@ -154,6 +280,8 @@ class URLInfoGatherer:
                     info['days_left'] = '?'
                 
                 info['issuer'] = str(cert.get('issuer', 'Bilinmiyor'))
+                info['subject'] = str(cert.get('subject', 'Bilinmiyor'))
+                info['valid'] = info.get('days_left', 0) > 0 if info.get('days_left') != '?' else False
                 
         except Exception as e:
             info['error'] = str(e)
@@ -161,9 +289,8 @@ class URLInfoGatherer:
         return info
     
     def get_dns_info(self, domain):
-        """DNS kayıtlarını sorgula"""
         info = {}
-        record_types = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'CNAME']
+        record_types = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'CNAME', 'SOA']
         
         for record in record_types:
             try:
@@ -175,27 +302,27 @@ class URLInfoGatherer:
         return info
     
     def get_whois_info(self, domain):
-        """WHOIS bilgileri"""
         try:
             w = whois.whois(domain)
             return {
                 'registrar': str(w.registrar) if w.registrar else 'Bilinmiyor',
                 'creation_date': str(w.creation_date) if w.creation_date else 'Bilinmiyor',
                 'expiration_date': str(w.expiration_date) if w.expiration_date else 'Bilinmiyor',
+                'updated_date': str(w.updated_date) if w.updated_date else 'Bilinmiyor',
                 'name_servers': w.name_servers if w.name_servers else [],
                 'org': str(w.org) if w.org else 'Bilinmiyor',
+                'country': str(w.country) if w.country else 'Bilinmiyor',
+                'emails': w.emails if hasattr(w, 'emails') else []
             }
         except Exception as e:
             return {'error': str(e)}
     
     def get_ip_info(self, domain):
-        """IP adresi ve lokasyon bilgisi"""
         info = {}
         try:
             ip = socket.gethostbyname(domain)
             info['ip'] = ip
             
-            # IP lokasyon
             try:
                 response = requests.get(f'http://ip-api.com/json/{ip}', timeout=5)
                 if response.status_code == 200:
@@ -203,7 +330,10 @@ class URLInfoGatherer:
                     if data.get('status') == 'success':
                         info['country'] = data.get('country', 'Bilinmiyor')
                         info['city'] = data.get('city', 'Bilinmiyor')
+                        info['region'] = data.get('regionName', 'Bilinmiyor')
                         info['isp'] = data.get('isp', 'Bilinmiyor')
+                        info['org'] = data.get('org', 'Bilinmiyor')
+                        info['timezone'] = data.get('timezone', 'Bilinmiyor')
             except:
                 pass
                 
@@ -212,13 +342,74 @@ class URLInfoGatherer:
         
         return info
     
-    def take_screenshot(self, url):
-        """Screenshot URL'si oluştur"""
-        return {'screenshot_url': f"https://api.microlink.io?url={url}&screenshot=true"}
+    def find_subdomains(self, domain):
+        """Subdomain bulma (DNS brute force)"""
+        found = []
+        print(f"\n{Fore.YELLOW}[*] Subdomain aranıyor: {domain}{Style.RESET_ALL}")
+        
+        for sub in COMMON_SUBDOMAINS:
+            test_domain = f"{sub}.{domain}"
+            try:
+                ip = socket.gethostbyname(test_domain)
+                found.append({
+                    'subdomain': test_domain,
+                    'ip': ip,
+                    'alive': True
+                })
+                print(f"{Fore.GREEN}[+] Bulundu: {test_domain} -> {ip}{Style.RESET_ALL}")
+            except:
+                pass
+        
+        return found
+    
+    def take_screenshot(self, url, domain):
+        """Gerçek screenshot al - webdriver-manager ile"""
+        if not self.screenshot:
+            return None
+        
+        if not SELENIUM_AVAILABLE:
+            return "Hata: Selenium kurulu değil. 'pip install selenium webdriver-manager'"
+            
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--disable-gpu")
+            
+            # Chromium binary yolunu zorla belirt
+            chrome_options.binary_location = "/usr/bin/chromium"
+            
+            # Önce sistemdeki chromedriver'ı kontrol et
+            result = subprocess.run(['which', 'chromedriver'], capture_output=True, text=True)
+            system_chromedriver = result.stdout.strip()
+            
+            if system_chromedriver and os.path.exists(system_chromedriver):
+                # Sistem chromedriver'ını kullan
+                service = Service(system_chromedriver)
+                print(f"{Fore.CYAN}[*] Sistem chromedriver'ı kullanılıyor: {system_chromedriver}{Style.RESET_ALL}")
+            else:
+                # Yoksa webdriver-manager'ı kullan
+                service = Service(ChromeDriverManager().install())
+                print(f"{Fore.CYAN}[*] webdriver-manager ile chromedriver indiriliyor...{Style.RESET_ALL}")
+            
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.get(url)
+            time.sleep(3)
+            
+            filename = f"{self.screenshot_dir}/{domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            driver.save_screenshot(filename)
+            driver.quit()
+            
+            return filename
+        except Exception as e:
+            return f"Hata: {str(e)[:200]}"
     
     def analyze_url(self, url):
-        """Tüm bilgileri topla"""
-        print(f"\n{Fore.CYAN}[+] Analiz ediliyor: {url}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}{'='*60}")
+        print(f"[+] Analiz ediliyor: {url}")
+        print(f"{'='*60}{Style.RESET_ALL}")
         
         normalized_url = self.normalize_url(url)
         parsed = urlparse(normalized_url)
@@ -232,7 +423,7 @@ class URLInfoGatherer:
             'dns': self.get_dns_info(domain),
         }
         
-        # SSL sadece HTTPS için
+        # SSL
         if parsed.scheme == 'https':
             result['ssl'] = self.get_ssl_info(domain)
         
@@ -241,64 +432,103 @@ class URLInfoGatherer:
         
         # Screenshot
         if self.screenshot:
-            result['screenshot'] = self.take_screenshot(normalized_url)
+            screenshot_path = self.take_screenshot(normalized_url, domain)
+            result['screenshot_path'] = screenshot_path
         
-        # Konsola yazdır
+        # Subdomain
+        if self.subdomain:
+            result['subdomains'] = self.find_subdomains(domain)
+        
         self.print_result(result)
-        
         return result
     
     def print_result(self, result):
-        """Sonuçları konsola yazdır"""
         url = result['url']
         http = result['http']
         
-        print(f"{Fore.GREEN}[✓] URL: {url}{Style.RESET_ALL}")
+        print(f"\n{Fore.GREEN}📌 URL: {url}{Style.RESET_ALL}")
         
-        if 'error' in http:
-            print(f"{Fore.RED}[✗] Hata: {http['error']}{Style.RESET_ALL}")
+        if 'error' in http and http['error'] != 'Hata':
+            print(f"{Fore.RED}✗ Hata: {http['error']}{Style.RESET_ALL}")
             return
         
-        print(f"{Fore.GREEN}[✓] Status: {http.get('status_code', '?')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}[✓] Title: {http.get('title', '?')[:50]}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}[✓] Server: {http.get('server', '?')}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}[✓] Content Length: {http.get('content_length', '?')} bytes{Style.RESET_ALL}")
+        # Status
+        status = http.get('status_code', '?')
+        if status == 200:
+            print(f"{Fore.GREEN}✓ Status: {status}{Style.RESET_ALL}")
+        elif status in [301, 302, 307, 308]:
+            print(f"{Fore.YELLOW}✓ Status: {status} (Redirect){Style.RESET_ALL}")
+        elif status in [403, 404, 500, 502, 503]:
+            print(f"{Fore.RED}✓ Status: {status}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.CYAN}✓ Status: {status}{Style.RESET_ALL}")
         
+        print(f"{Fore.GREEN}✓ Title: {http.get('title', '?')[:80]}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}✓ Server: {http.get('server', '?')}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}✓ Content Length: {http.get('content_length', '?')} bytes{Style.RESET_ALL}")
+        
+        # Technologies
         if http.get('technologies'):
-            print(f"{Fore.MAGENTA}[✓] Technologies: {', '.join(http['technologies'])}{Style.RESET_ALL}")
+            tech_str = ', '.join(http['technologies'][:10])
+            print(f"{Fore.MAGENTA}✓ Technologies: {tech_str}{Style.RESET_ALL}")
+        
+        # Security Headers
+        if http.get('security_headers'):
+            print(f"{Fore.CYAN}✓ Security Headers:{Style.RESET_ALL}")
+            for header, status in http['security_headers'].items():
+                color = Fore.GREEN if status == '✅' else Fore.RED
+                print(f"  {color}{status} {header}{Style.RESET_ALL}")
         
         # SSL
         if 'ssl' in result and result['ssl'].get('expires'):
-            ssl_info = result['ssl']
-            print(f"{Fore.GREEN}[✓] SSL Expires: {ssl_info['expires']} ({ssl_info.get('days_left', '?')} days left){Style.RESET_ALL}")
+            ssl = result['ssl']
+            if ssl.get('valid', False):
+                print(f"{Fore.GREEN}✓ SSL: {ssl['expires']} ({ssl.get('days_left', '?')} gün kaldı){Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}✓ SSL: SÜRESİ DOLDU!{Style.RESET_ALL}")
         
         # IP
-        ip_info = result['ip']
-        if 'ip' in ip_info:
-            print(f"{Fore.GREEN}[✓] IP: {ip_info['ip']}{Style.RESET_ALL}")
-            if 'country' in ip_info:
-                print(f"{Fore.GREEN}[✓] Location: {ip_info.get('city', '')}, {ip_info['country']}{Style.RESET_ALL}")
-            if 'isp' in ip_info:
-                print(f"{Fore.GREEN}[✓] ISP: {ip_info['isp']}{Style.RESET_ALL}")
+        ip = result['ip']
+        if 'ip' in ip:
+            print(f"{Fore.GREEN}✓ IP: {ip['ip']}{Style.RESET_ALL}")
+            if 'country' in ip:
+                print(f"{Fore.GREEN}✓ Location: {ip.get('city', '')}, {ip['country']}{Style.RESET_ALL}")
+            if 'isp' in ip:
+                print(f"{Fore.GREEN}✓ ISP: {ip['isp']}{Style.RESET_ALL}")
         
-        # DNS
-        dns = result['dns']
-        if dns.get('A'):
-            print(f"{Fore.CYAN}[✓] DNS A: {', '.join(dns['A'][:3])}{Style.RESET_ALL}")
-        if dns.get('MX'):
-            print(f"{Fore.CYAN}[✓] DNS MX: {', '.join(dns['MX'][:2])}{Style.RESET_ALL}")
+        # Emails
+        if http.get('emails'):
+            print(f"{Fore.YELLOW}✓ Emails: {', '.join(http['emails'][:5])}{Style.RESET_ALL}")
         
-        # Links
-        if http.get('links'):
-            print(f"{Fore.CYAN}[✓] Links found: {len(http['links'])}{Style.RESET_ALL}")
+        # Social Media
+        if http.get('social_media'):
+            print(f"{Fore.MAGENTA}✓ Social Media:{Style.RESET_ALL}")
+            for sm in http['social_media'][:5]:
+                print(f"  {Fore.CYAN}→ {sm['platform']}: {sm['handle']}{Style.RESET_ALL}")
+        
+        # Screenshot
+        if 'screenshot_path' in result and result['screenshot_path']:
+            if not result['screenshot_path'].startswith('Hata'):
+                print(f"{Fore.GREEN}✓ Screenshot: {result['screenshot_path']}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}✓ Screenshot: {result['screenshot_path'][:100]}{Style.RESET_ALL}")
+        
+        # Subdomains
+        if 'subdomains' in result and result['subdomains']:
+            print(f"{Fore.CYAN}✓ Subdomains Bulunan: {len(result['subdomains'])}{Style.RESET_ALL}")
+            for sub in result['subdomains'][:10]:
+                print(f"  → {sub['subdomain']} ({sub['ip']})")
+        
+        print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
     
     def scan_all(self):
-        """Tüm URL'leri tara"""
         print(BANNER)
-        print(f"{Fore.YELLOW}[+] Hedef sayısı: {len(self.urls)}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[+] Thread: {self.threads}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[+] Screenshot: {'Aktif' if self.screenshot else 'Kapalı'}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[+] Başlangıç: {datetime.now()}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}📊 Tarama Bilgileri:{Style.RESET_ALL}")
+        print(f"  • Hedef sayısı: {len(self.urls)}")
+        print(f"  • Thread sayısı: {self.threads}")
+        print(f"  • Screenshot: {'Aktif' if self.screenshot else 'Kapalı'}")
+        print(f"  • Subdomain: {'Aktif' if self.subdomain else 'Kapalı'}")
+        print(f"  • Başlangıç: {datetime.now()}\n")
         
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
             futures = {executor.submit(self.analyze_url, url): url for url in self.urls}
@@ -309,22 +539,29 @@ class URLInfoGatherer:
         self.generate_report()
     
     def generate_report(self):
-        """Rapor oluştur"""
-        print(f"\n{Fore.CYAN}╔══════════════════════════════════════════════════════════════╗")
-        print(f"║                    RAPOR ÖZETİ                                      ║")
-        print(f"╚══════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+        print(f"\n{Fore.BLUE}╔══════════════════════════════════════════════════════════════════════════╗")
+        print(f"║                         RAPOR ÖZETİ                                              ║")
+        print(f"╚══════════════════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
         
-        print(f"{Fore.YELLOW}[+] Toplam URL: {len(self.results)}{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[+] Bitiş: {datetime.now()}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}✓ Toplam URL: {len(self.results)}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}✓ Bitiş: {datetime.now()}{Style.RESET_ALL}")
+        
+        total_emails = sum(len(r['http'].get('emails', [])) for r in self.results)
+        total_links = sum(len(r['http'].get('links', [])) for r in self.results)
+        total_techs = sum(len(r['http'].get('technologies', [])) for r in self.results)
+        
+        print(f"{Fore.CYAN}✓ Toplam email: {total_emails}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}✓ Toplam link: {total_links}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}✓ Toplam teknoloji: {total_techs}{Style.RESET_ALL}")
         
         if self.output:
             if self.format == 'json':
                 with open(self.output, 'w', encoding='utf-8') as f:
                     json.dump(self.results, f, indent=2, ensure_ascii=False, default=str)
-                print(f"{Fore.GREEN}[+] JSON raporu kaydedildi: {self.output}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}✓ JSON raporu: {self.output}{Style.RESET_ALL}")
             elif self.format == 'csv':
                 with open(self.output, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=['url', 'status', 'title', 'server', 'ip', 'technologies'])
+                    writer = csv.DictWriter(f, fieldnames=['url', 'status', 'title', 'server', 'ip', 'technologies', 'emails'])
                     writer.writeheader()
                     for r in self.results:
                         writer.writerow({
@@ -333,25 +570,27 @@ class URLInfoGatherer:
                             'title': r['http'].get('title', ''),
                             'server': r['http'].get('server', ''),
                             'ip': r['ip'].get('ip', ''),
-                            'technologies': ', '.join(r['http'].get('technologies', []))
+                            'technologies': ', '.join(r['http'].get('technologies', [])),
+                            'emails': ', '.join(r['http'].get('emails', []))
                         })
-                print(f"{Fore.GREEN}[+] CSV raporu kaydedildi: {self.output}{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}✓ CSV raporu: {self.output}{Style.RESET_ALL}")
 
 def load_urls_from_file(file_path):
-    """Dosyadan URL listesi oku"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
 
 def main():
     parser = argparse.ArgumentParser(
-        description="URL Info Gatherer v2.0 - URL Bilgi Toplama Aracı",
+        description="URL Info Gatherer v3.0 - URL Bilgi Toplama Aracı",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Örnekler:
   python url_info.py https://google.com
   python url_info.py -f urls.txt -t 10
-  python url_info.py https://google.com -o sonuc.json
+  python url_info.py https://google.com -o rapor.json
   python url_info.py https://google.com --screenshot
+  python url_info.py https://google.com --subdomain
+  python url_info.py https://google.com -o rapor.csv --format csv
         """
     )
     
@@ -359,12 +598,12 @@ def main():
     parser.add_argument("-f", "--file", help="URL listesi içeren dosya")
     parser.add_argument("-o", "--output", help="Çıktı dosyası")
     parser.add_argument("--format", choices=['json', 'csv'], default='json', help="Çıktı formatı")
-    parser.add_argument("-t", "--threads", type=int, default=5, help="Thread sayısı")
-    parser.add_argument("--screenshot", action="store_true", help="Screenshot URL'si ekle")
+    parser.add_argument("-t", "--threads", type=int, default=5, help="Thread sayısı (varsayılan: 5)")
+    parser.add_argument("--screenshot", action="store_true", help="Screenshot al")
+    parser.add_argument("--subdomain", action="store_true", help="Subdomain ara")
     
     args = parser.parse_args()
     
-    # URL'leri topla
     urls = []
     if args.url:
         urls.append(args.url)
@@ -380,8 +619,7 @@ def main():
         print(f"{Fore.YELLOW}Kullanım: python url_info.py https://google.com{Style.RESET_ALL}")
         sys.exit(1)
     
-    # Tarama başlat
-    gatherer = URLInfoGatherer(urls, args.output, args.format, args.screenshot, args.threads)
+    gatherer = URLInfoGathererV3(urls, args.output, args.format, args.screenshot, args.threads, args.subdomain)
     gatherer.scan_all()
 
 if __name__ == "__main__":
