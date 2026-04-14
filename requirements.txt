@@ -3,4 +3,5 @@ dnspython
 python-whois
 colorama
 Pillow
-
+selenium
+webdriver-manager
