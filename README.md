@@ -1,6 +1,3 @@
-İşte **güncel README.md** (direkt kopyala-yapıştır yap):
-
-```markdown
 # 🐉 URL Info Gatherer v2.0
 
 > **3 Başlı Ejderha** | Red Team | Purple Team | Blue Team
